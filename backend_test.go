@@ -395,6 +395,50 @@ func TestBackendTransform(t *testing.T) {
 	}
 }
 
+func TestBackendTransformSVGMatrixOrder(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform recording.Matrix
+		want      string
+	}{
+		{
+			name:      "asymmetric shear",
+			transform: recording.Shear(2, 3),
+			want:      `transform="matrix(1,3,2,1,0,0)"`,
+		},
+		{
+			name: "quarter turn",
+			transform: recording.Matrix{
+				A: 0, B: -1, C: 0,
+				D: 1, E: 0, F: 0,
+			},
+			want: `transform="matrix(0,1,-1,0,0,0)"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := NewBackend()
+			if err := backend.Begin(100, 100); err != nil {
+				t.Fatalf("Begin failed: %v", err)
+			}
+			backend.SetTransform(tt.transform)
+
+			path := gg.NewPath()
+			path.Rectangle(10, 10, 20, 20)
+			backend.FillPath(path, recording.NewSolidBrush(gg.RGBA{R: 1, A: 1}), recording.FillRuleNonZero)
+
+			var buf bytes.Buffer
+			if _, err := backend.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
+			}
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("SVG transform has incorrect coefficient order; want %q in:\n%s", tt.want, buf.String())
+			}
+		})
+	}
+}
+
 func TestRecordingPlaybackDoesNotApplyTransformTwice(t *testing.T) {
 	recorder := recording.NewRecorder(200, 150)
 	recorder.Translate(10, 20)

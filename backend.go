@@ -503,7 +503,7 @@ func (b *Backend) writeTransform() {
 		return
 	}
 	fmt.Fprintf(&b.builder, ` transform="matrix(%g,%g,%g,%g,%g,%g)"`,
-		m.A, m.B, m.D, m.E, m.C, m.F)
+		m.A, m.D, m.B, m.E, m.C, m.F)
 }
 
 // writeClip writes the clip-path attribute if set.
