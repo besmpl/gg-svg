@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -556,6 +557,111 @@ func TestBackendDrawImageClipsSourceAtImageEdge(t *testing.T) {
 	if !strings.Contains(element, `x="7" y="5" width="6" height="8"`) {
 		t.Errorf("clipped destination rectangle missing or changed: %s", element)
 	}
+}
+
+func TestBackendDrawImageUsesFullImageForZeroSourceDimension(t *testing.T) {
+	tests := []struct {
+		name string
+		src  recording.Rect
+	}{
+		{name: "zero width", src: recording.NewRect(1, 1, 0, 2)},
+		{name: "zero height", src: recording.NewRect(1, 1, 2, 0)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svg := drawImageSVG(
+				t,
+				distinctColorImage(),
+				tt.src,
+				recording.NewRect(5, 6, 20, 10),
+			)
+			embedded, element := decodeEmbeddedImage(t, svg)
+			if got := embedded.Bounds().Size(); got != (image.Point{X: 4, Y: 4}) {
+				t.Fatalf("embedded image size = %v, want 4x4", got)
+			}
+			if !strings.Contains(element, `x="5" y="6" width="20" height="10"`) {
+				t.Errorf("destination rectangle missing or changed: %s", element)
+			}
+		})
+	}
+}
+
+func TestBackendDrawImageOmitsInvalidRegions(t *testing.T) {
+	tests := []struct {
+		name string
+		img  image.Image
+		src  recording.Rect
+		dst  recording.Rect
+	}{
+		{
+			name: "zero destination width",
+			img:  distinctColorImage(),
+			src:  recording.NewRect(0, 0, 1, 1),
+			dst:  recording.NewRect(5, 6, 0, 10),
+		},
+		{
+			name: "empty image",
+			img:  image.NewRGBA(image.Rect(0, 0, 0, 4)),
+			src:  recording.NewRect(0, 0, 1, 1),
+			dst:  recording.NewRect(5, 6, 20, 10),
+		},
+		{
+			name: "negative source width",
+			img:  distinctColorImage(),
+			src:  recording.NewRect(1, 1, -1, 2),
+			dst:  recording.NewRect(5, 6, 20, 10),
+		},
+		{
+			name: "source outside image",
+			img:  distinctColorImage(),
+			src:  recording.NewRect(10, 10, 2, 2),
+			dst:  recording.NewRect(5, 6, 20, 10),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svg := drawImageSVG(t, tt.img, tt.src, tt.dst)
+			if strings.Contains(svg, "<image") {
+				t.Errorf("invalid image region emitted an SVG image element: %s", svg)
+			}
+		})
+	}
+}
+
+func TestCropImageRejectsNaNSource(t *testing.T) {
+	src := recording.Rect{MinX: math.NaN(), MinY: 0, MaxX: math.NaN(), MaxY: 1}
+	if _, _, ok := cropImage(distinctColorImage(), src, recording.NewRect(0, 0, 1, 1)); ok {
+		t.Fatal("cropImage accepted a source rectangle with NaN coordinates")
+	}
+}
+
+func TestCropImageIntegerBoundsHelpers(t *testing.T) {
+	if got := minInt(1, 2); got != 1 {
+		t.Errorf("minInt(1, 2) = %d, want 1", got)
+	}
+	if got := maxInt(2, 1); got != 2 {
+		t.Errorf("maxInt(2, 1) = %d, want 2", got)
+	}
+}
+
+func drawImageSVG(t *testing.T, img image.Image, src, dst recording.Rect) string {
+	t.Helper()
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+	backend.DrawImage(img, src, dst, recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+	return buf.String()
 }
 
 func distinctColorImage() *image.RGBA {
