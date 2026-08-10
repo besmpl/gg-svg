@@ -35,6 +35,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"io"
 	"math"
@@ -214,6 +215,14 @@ func (b *Backend) DrawImage(img image.Image, src, dst recording.Rect, opts recor
 		return
 	}
 
+	// A zero source rectangle means the entire image. Source rectangles that
+	// extend past the image bounds are clipped and their visible portion is
+	// mapped to the corresponding portion of the destination rectangle.
+	img, dst, ok := cropImage(img, src, dst)
+	if !ok {
+		return
+	}
+
 	// Encode image to PNG and then to base64 data URI
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
@@ -234,6 +243,101 @@ func (b *Backend) DrawImage(img image.Image, src, dst recording.Rect, opts recor
 
 	b.builder.WriteString(` preserveAspectRatio="none"`)
 	b.builder.WriteString("/>")
+}
+
+// cropImage returns an image containing the source rectangle and the
+// destination rectangle where that image should be rendered. Source
+// coordinates are local to the image (the same zero-origin coordinates used
+// by recording.Recorder), even when img.Bounds has a non-zero minimum. Pixel
+// boundaries are rounded outwards so a partially covered edge pixel is not
+// silently dropped.
+func cropImage(img image.Image, src, dst recording.Rect) (image.Image, recording.Rect, bool) {
+	if dst.Width() <= 0 || dst.Height() <= 0 {
+		return nil, recording.Rect{}, false
+	}
+
+	bounds := img.Bounds()
+	if bounds.Dx() <= 0 || bounds.Dy() <= 0 {
+		return nil, recording.Rect{}, false
+	}
+
+	// SrcRect is optional in a DrawImageCommand. Treat either zero dimension
+	// as the documented full-image sentinel, while rejecting negative sizes.
+	if src.Width() == 0 || src.Height() == 0 {
+		src = recording.NewRect(
+			0,
+			0,
+			float64(bounds.Dx()),
+			float64(bounds.Dy()),
+		)
+	}
+	if src.Width() <= 0 || src.Height() <= 0 {
+		return nil, recording.Rect{}, false
+	}
+
+	// Translate the recording-local source rectangle into image coordinates
+	// before clipping and copying pixels.
+	src = recording.NewRect(
+		src.MinX+float64(bounds.Min.X),
+		src.MinY+float64(bounds.Min.Y),
+		src.Width(),
+		src.Height(),
+	)
+
+	// Clip in source coordinates before converting to integer pixel bounds.
+	minX := math.Max(src.MinX, float64(bounds.Min.X))
+	minY := math.Max(src.MinY, float64(bounds.Min.Y))
+	maxX := math.Min(src.MaxX, float64(bounds.Max.X))
+	maxY := math.Min(src.MaxY, float64(bounds.Max.Y))
+	if minX >= maxX || minY >= maxY {
+		return nil, recording.Rect{}, false
+	}
+
+	// image.Image pixels are addressed by integer coordinates. Round outwards
+	// so clipping at an image edge never produces an empty crop for a source
+	// rectangle that intersects a pixel.
+	cropMinX := maxInt(bounds.Min.X, int(math.Floor(minX)))
+	cropMinY := maxInt(bounds.Min.Y, int(math.Floor(minY)))
+	cropMaxX := minInt(bounds.Max.X, int(math.Ceil(maxX)))
+	cropMaxY := minInt(bounds.Max.Y, int(math.Ceil(maxY)))
+	if cropMinX >= cropMaxX || cropMinY >= cropMaxY {
+		return nil, recording.Rect{}, false
+	}
+
+	// Keep the source's non-premultiplied channels when copying transparent
+	// pixels. Using image.RGBA here would round/unpremultiply NRGBA values.
+	cropped := image.NewNRGBA(image.Rect(0, 0, cropMaxX-cropMinX, cropMaxY-cropMinY))
+	draw.Draw(cropped, cropped.Bounds(), img, image.Pt(cropMinX, cropMinY), draw.Src)
+
+	// Keep source-to-destination scaling intact when the source rectangle was
+	// clipped at an image edge. Use the clipped floating-point source bounds
+	// rather than the outward-rounded crop bounds so fractional source
+	// rectangles do not expand the destination unexpectedly.
+	srcW := src.Width()
+	srcH := src.Height()
+	dstW := dst.Width()
+	dstH := dst.Height()
+	dstMinX, dstMinY := dst.MinX, dst.MinY
+	dst.MaxX = dstMinX + (maxX-src.MinX)*dstW/srcW
+	dst.MinX = dstMinX + (minX-src.MinX)*dstW/srcW
+	dst.MaxY = dstMinY + (maxY-src.MinY)*dstH/srcH
+	dst.MinY = dstMinY + (minY-src.MinY)*dstH/srcH
+
+	return cropped, dst, true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // DrawText draws text at the given position with the specified font face and brush.

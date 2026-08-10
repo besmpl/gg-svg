@@ -2,6 +2,10 @@ package svg
 
 import (
 	"bytes"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -388,6 +392,220 @@ func TestBackendTransform(t *testing.T) {
 	if !strings.Contains(svg, `transform="matrix(`) {
 		t.Error("Output should contain transform attribute")
 	}
+}
+
+func TestBackendDrawImageCropsSource(t *testing.T) {
+	img := distinctColorImage()
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+
+	src := recording.NewRect(1, 1, 2, 2)
+	dst := recording.NewRect(5, 6, 20, 10)
+	backend.DrawImage(img, src, dst, recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+
+	embedded, element := decodeEmbeddedImage(t, buf.String())
+	if got := embedded.Bounds().Size(); got != (image.Point{X: 2, Y: 2}) {
+		t.Fatalf("embedded image size = %v, want 2x2", got)
+	}
+
+	want := [][]color.NRGBA{
+		{{255, 128, 0, 255}, {128, 0, 255, 255}},
+		{{64, 64, 64, 255}, {192, 192, 192, 255}},
+	}
+	for y, row := range want {
+		for x, wantPixel := range row {
+			gotPixel := color.NRGBAModel.Convert(embedded.At(x, y)).(color.NRGBA)
+			if gotPixel != wantPixel {
+				t.Errorf("embedded pixel (%d,%d) = %v, want %v", x, y, gotPixel, wantPixel)
+			}
+		}
+	}
+
+	if !strings.Contains(element, `x="5" y="6" width="20" height="10"`) {
+		t.Errorf("destination rectangle missing or changed: %s", element)
+	}
+}
+
+func TestBackendDrawImageUsesLocalCoordinatesForNonZeroImageBounds(t *testing.T) {
+	img := distinctColorImageAt(image.Rect(10, 20, 14, 24))
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+
+	// Recorder source rectangles are local to the image, regardless of the
+	// image.Image bounds origin.
+	backend.DrawImage(img, recording.NewRect(1, 1, 2, 2), recording.NewRect(5, 6, 20, 10), recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+
+	embedded, _ := decodeEmbeddedImage(t, buf.String())
+	if got := embedded.Bounds().Size(); got != (image.Point{X: 2, Y: 2}) {
+		t.Fatalf("embedded image size = %v, want 2x2", got)
+	}
+	want := [][]color.NRGBA{
+		{{255, 128, 0, 255}, {128, 0, 255, 255}},
+		{{64, 64, 64, 255}, {192, 192, 192, 255}},
+	}
+	for y, row := range want {
+		for x, wantPixel := range row {
+			gotPixel := color.NRGBAModel.Convert(embedded.At(x, y)).(color.NRGBA)
+			if gotPixel != wantPixel {
+				t.Errorf("embedded pixel (%d,%d) = %v, want %v", x, y, gotPixel, wantPixel)
+			}
+		}
+	}
+}
+
+func TestBackendDrawImageFractionalSourcePreservesDestinationMapping(t *testing.T) {
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+
+	// The crop image needs integer pixel bounds, but the SVG destination must
+	// still represent the requested fractional source rectangle exactly.
+	backend.DrawImage(distinctColorImage(), recording.NewRect(0.25, 0.25, 1.5, 1.5), recording.NewRect(5, 6, 20, 10), recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+	_, element := decodeEmbeddedImage(t, buf.String())
+	if !strings.Contains(element, `x="5" y="6" width="20" height="10"`) {
+		t.Errorf("fractional source changed destination mapping: %s", element)
+	}
+}
+
+func TestBackendDrawImagePreservesUnpremultipliedColors(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 3, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{R: 1, G: 2, B: 3, A: 255})
+	img.SetNRGBA(1, 0, color.NRGBA{R: 255, G: 64, B: 32, A: 128})
+	img.SetNRGBA(2, 0, color.NRGBA{R: 12, G: 34, B: 56, A: 0})
+
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+	backend.DrawImage(img, recording.NewRect(1, 0, 2, 1), recording.NewRect(5, 6, 20, 10), recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+	embedded, _ := decodeEmbeddedImage(t, buf.String())
+	want := []color.NRGBA{
+		{R: 255, G: 64, B: 32, A: 128},
+		{R: 12, G: 34, B: 56, A: 0},
+	}
+	for x, wantPixel := range want {
+		gotPixel := color.NRGBAModel.Convert(embedded.At(x, 0)).(color.NRGBA)
+		if gotPixel != wantPixel {
+			t.Errorf("embedded pixel (%d,0) = %v, want %v", x, gotPixel, wantPixel)
+		}
+	}
+}
+
+func TestBackendDrawImageClipsSourceAtImageEdge(t *testing.T) {
+	img := distinctColorImage()
+	backend := NewBackend()
+	if err := backend.Begin(40, 30); err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+
+	// The left source pixel lies outside img. The visible two-thirds should
+	// occupy the corresponding two-thirds of the destination rectangle.
+	src := recording.NewRect(-1, 1, 3, 2)
+	dst := recording.NewRect(4, 5, 9, 8)
+	backend.DrawImage(img, src, dst, recording.DefaultImageOptions())
+	if err := backend.End(); err != nil {
+		t.Fatalf("End failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := backend.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+
+	embedded, element := decodeEmbeddedImage(t, buf.String())
+	if got := embedded.Bounds().Size(); got != (image.Point{X: 2, Y: 2}) {
+		t.Fatalf("embedded image size = %v, want 2x2", got)
+	}
+	if !strings.Contains(element, `x="7" y="5" width="6" height="8"`) {
+		t.Errorf("clipped destination rectangle missing or changed: %s", element)
+	}
+}
+
+func distinctColorImage() *image.RGBA {
+	return distinctColorImageAt(image.Rect(0, 0, 4, 4))
+}
+
+func distinctColorImageAt(bounds image.Rectangle) *image.RGBA {
+	img := image.NewRGBA(bounds)
+	colors := []color.RGBA{
+		{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255}, {255, 0, 255, 255},
+		{255, 255, 0, 255}, {255, 128, 0, 255}, {128, 0, 255, 255}, {0, 255, 255, 255},
+		{128, 128, 128, 255}, {64, 64, 64, 255}, {192, 192, 192, 255}, {255, 255, 255, 255},
+		{0, 0, 0, 255}, {64, 128, 192, 255}, {192, 128, 64, 255}, {32, 96, 160, 255},
+	}
+	for i, c := range colors {
+		img.SetRGBA(bounds.Min.X+i%4, bounds.Min.Y+i/4, c)
+	}
+	return img
+}
+
+func decodeEmbeddedImage(t *testing.T, svg string) (image.Image, string) {
+	t.Helper()
+	start := strings.Index(svg, "<image")
+	if start < 0 {
+		t.Fatalf("SVG output does not contain an image element: %s", svg)
+	}
+	relEnd := strings.Index(svg[start:], "/>")
+	if relEnd < 0 {
+		t.Fatalf("SVG image element is not self-closing: %s", svg[start:])
+	}
+	element := svg[start : start+relEnd+2]
+	const prefix = `href="data:image/png;base64,`
+	hrefStart := strings.Index(element, prefix)
+	if hrefStart < 0 {
+		t.Fatalf("SVG image element has no PNG data URI: %s", element)
+	}
+	hrefStart += len(prefix)
+	hrefEnd := strings.IndexByte(element[hrefStart:], '"')
+	if hrefEnd < 0 {
+		t.Fatalf("SVG image data URI is unterminated: %s", element)
+	}
+	pngBytes, err := base64.StdEncoding.DecodeString(element[hrefStart : hrefStart+hrefEnd])
+	if err != nil {
+		t.Fatalf("decode embedded PNG: %v", err)
+	}
+	embedded, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		t.Fatalf("decode embedded PNG image: %v", err)
+	}
+	return embedded, element
 }
 
 func TestBackendSaveToFile(t *testing.T) {
