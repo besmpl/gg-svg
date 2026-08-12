@@ -390,8 +390,90 @@ func TestBackendTransform(t *testing.T) {
 	}
 
 	svg := buf.String()
-	if !strings.Contains(svg, `transform="matrix(`) {
-		t.Error("Output should contain transform attribute")
+	if !strings.Contains(svg, `transform="matrix(1,0,0,1,100,50)" d="M10 10L40 10L40 40L10 40Z"`) {
+		t.Errorf("Direct backend output should apply its transform to local geometry:\n%s", svg)
+	}
+}
+
+func TestBackendTransformSVGMatrixOrder(t *testing.T) {
+	tests := []struct {
+		name      string
+		transform recording.Matrix
+		want      string
+	}{
+		{
+			name:      "asymmetric shear",
+			transform: recording.Shear(2, 3),
+			want:      `transform="matrix(1,3,2,1,0,0)"`,
+		},
+		{
+			name: "quarter turn",
+			transform: recording.Matrix{
+				A: 0, B: -1, C: 0,
+				D: 1, E: 0, F: 0,
+			},
+			want: `transform="matrix(0,1,-1,0,0,0)"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := NewBackend()
+			if err := backend.Begin(100, 100); err != nil {
+				t.Fatalf("Begin failed: %v", err)
+			}
+			backend.SetTransform(tt.transform)
+
+			path := gg.NewPath()
+			path.Rectangle(10, 10, 20, 20)
+			backend.FillPath(path, recording.NewSolidBrush(gg.RGBA{R: 1, A: 1}), recording.FillRuleNonZero)
+
+			var buf bytes.Buffer
+			if _, err := backend.WriteTo(&buf); err != nil {
+				t.Fatalf("WriteTo failed: %v", err)
+			}
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("SVG transform has incorrect coefficient order; want %q in:\n%s", tt.want, buf.String())
+			}
+		})
+	}
+}
+
+func TestRecordingPlaybackDoesNotApplyTransformTwice(t *testing.T) {
+	recorder := recording.NewRecorder(200, 150)
+	recorder.Translate(10, 20)
+	recorder.Scale(2, 3)
+	recorder.SetFillRGBA(1, 0, 0, 1)
+	recorder.DrawRectangle(1, 2, 4, 5)
+	recorder.Fill()
+	recorder.FillRectangle(3, 4, 5, 6)
+
+	backend, err := recording.NewBackend("svg")
+	if err != nil {
+		t.Fatalf("NewBackend failed: %v", err)
+	}
+	if err := recorder.FinishRecording().Playback(backend); err != nil {
+		t.Fatalf("Playback failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	writer, ok := backend.(recording.WriterBackend)
+	if !ok {
+		t.Fatal("registered SVG backend does not implement recording.WriterBackend")
+	}
+	if _, err := writer.WriteTo(&buf); err != nil {
+		t.Fatalf("WriteTo failed: %v", err)
+	}
+
+	output := buf.String()
+	if strings.Contains(output, ` transform="matrix(`) {
+		t.Errorf("Playback emitted a transform for world-space recorder geometry:\n%s", output)
+	}
+	if !strings.Contains(output, `d="M12 26L20 26L20 41L12 41Z"`) {
+		t.Errorf("Playback path does not use the recorder's world-space coordinates:\n%s", output)
+	}
+	if !strings.Contains(output, `<rect x="16" y="32" width="10" height="18"`) {
+		t.Errorf("Playback rectangle does not use the recorder's world-space coordinates:\n%s", output)
 	}
 }
 

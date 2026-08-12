@@ -53,6 +53,11 @@ type Backend struct {
 	width  int
 	height int
 
+	// emitTransforms is enabled for direct Backend use. Recorder geometry is
+	// already in world space, so the registry constructs a playback backend
+	// with this disabled to avoid applying Recorder transforms a second time.
+	emitTransforms bool
+
 	// SVG content builder
 	builder strings.Builder
 
@@ -83,6 +88,19 @@ type backendState struct {
 // The backend starts in an uninitialized state. Call Begin() to initialize
 // with specific dimensions before drawing.
 func NewBackend() *Backend {
+	return &Backend{
+		emitTransforms: true,
+		stateStack:     make([]backendState, 0, 8),
+	}
+}
+
+// newPlaybackBackend creates the backend registered with recording. Recorder
+// operations eagerly transform paths, rectangles, images, text positions, and
+// clips into world coordinates, despite Playback also forwarding transform
+// state. Suppressing SVG transform attributes at this integration seam keeps
+// that world-space geometry unchanged while NewBackend retains transform
+// support for callers that drive the Backend interface directly.
+func newPlaybackBackend() *Backend {
 	return &Backend{
 		stateStack: make([]backendState, 0, 8),
 	}
@@ -477,12 +495,15 @@ func (b *Backend) pathToD(path *gg.Path) string {
 
 // writeTransform writes the transform attribute if not identity.
 func (b *Backend) writeTransform() {
+	if !b.emitTransforms {
+		return
+	}
 	m := b.currentTransform
 	if m.IsIdentity() {
 		return
 	}
 	fmt.Fprintf(&b.builder, ` transform="matrix(%g,%g,%g,%g,%g,%g)"`,
-		m.A, m.B, m.D, m.E, m.C, m.F)
+		m.A, m.D, m.B, m.E, m.C, m.F)
 }
 
 // writeClip writes the clip-path attribute if set.
